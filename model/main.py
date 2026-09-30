@@ -31,10 +31,6 @@ from transformer.Models import (
     FlowMatchingTHP,
 )
 from flow_matching.solver import ODESolver
-from context_conditioned_absence_memory import (
-    build_context_conditioned_absence_evidence,
-    load_memory_sequences,
-)
 
 
 def synchronize_device(device):
@@ -209,339 +205,11 @@ def unpack_batch(batch, device, return_drift=False, return_rq2=False):
     return event_time.to(device), time_gap_norm.to(device), event_type.to(device), event_label
 
 
-def _safe_text(value):
-    if value is None:
-        return ''
-    text = str(value).strip()
-    if text.lower() in {'', 'none', 'nan', '<missing>', 'unknown'}:
-        return ''
-    return text
-
-
-def _split_service_list(value):
-    text = _safe_text(value)
-    if not text:
-        return []
-    parts = []
-    for chunk in text.replace(';', ',').replace('|', ',').split(','):
-        item = chunk.strip()
-        if item:
-            parts.append(item)
-    return parts
-
-
-def _service_allowed_for_absence(service, opt):
-    service = _safe_text(service)
-    if not service:
-        return False
-    lowered = service.lower()
-    if lowered.startswith('__state_') or lowered.startswith('__log_'):
-        return False
-    excluded = {
-        item.strip()
-        for item in str(getattr(opt, 'absence_exclude_services', '')).split(',')
-        if item.strip()
-    }
-    if service in excluded:
-        return False
-    prefixes = [
-        item.strip()
-        for item in str(getattr(opt, 'absence_service_prefixes', '')).split(',')
-        if item.strip()
-    ]
-    if prefixes and not any(service.startswith(prefix) for prefix in prefixes):
-        return False
-    return True
-
-
-def _event_service_for_absence(event):
-    for key in ('service', 'sequence_service', 'component_id'):
-        service = _safe_text(event.get(key))
-        if service:
-            return service
-    return ''
-
-
-def _event_is_normal_reference(event):
-    label = event.get('label', event.get('is_anomaly', 0))
-    try:
-        if int(float(label)) != 0:
-            return False
-    except (TypeError, ValueError):
-        text = str(label).strip().lower()
-        if text not in {'0', 'false', 'normal', 'benign', 'ok'}:
-            return False
-    drift = str(event.get('drift_label', 'normal')).strip().lower().replace('-', '_')
-    if drift in {'unexpected', 'unexpected_drift', 'reject', 'rejected'}:
-        return False
-    return True
-
-
-def _aggregate_run_service_counts(raw_data, opt, normal_only=False):
-    runs = defaultdict(lambda: {'counts': Counter(), 'meta': {}, 'events': 0, 'normal': True})
-    for seq in raw_data or []:
-        if not seq:
-            continue
-        first = seq[0]
-        run_id = _safe_text(first.get('run_id')) or _safe_text(first.get('sequence_id'))
-        if not run_id:
-            continue
-        record = runs[run_id]
-        if not record['meta']:
-            record['meta'] = dict(first)
-        for event in seq:
-            if normal_only and not _event_is_normal_reference(event):
-                record['normal'] = False
-            service = _event_service_for_absence(event)
-            if not _service_allowed_for_absence(service, opt):
-                continue
-            record['counts'][service] += 1
-            record['events'] += 1
-    if normal_only:
-        runs = {
-            run_id: record
-            for run_id, record in runs.items()
-            if record['normal'] and record['events'] > 0
-        }
-    else:
-        runs = {
-            run_id: record
-            for run_id, record in runs.items()
-            if record['events'] > 0
-        }
-    return runs
-
-
 def _load_raw_split(opt, split):
     path = os.path.join(opt.data, f'{split}.pkl')
     with open(path, 'rb') as f:
         obj = pickle.load(f, encoding='latin-1')
     return obj[split]
-
-
-def _fit_absence_reference(raw_data, opt):
-    runs = _aggregate_run_service_counts(raw_data, opt, normal_only=True)
-    services = sorted({
-        service
-        for record in runs.values()
-        for service in record['counts'].keys()
-    })
-    if not runs or not services:
-        return None
-
-    run_ids = sorted(runs.keys())
-    counts = np.zeros((len(run_ids), len(services)), dtype=np.float32)
-    service_to_idx = {service: idx for idx, service in enumerate(services)}
-    for row, run_id in enumerate(run_ids):
-        for service, count in runs[run_id]['counts'].items():
-            idx = service_to_idx.get(service)
-            if idx is not None:
-                counts[row, idx] = float(count)
-
-    features = np.log1p(counts)
-    norms = np.linalg.norm(features, axis=1, keepdims=True)
-    features = features / np.maximum(norms, 1e-8)
-    return {
-        'run_ids': run_ids,
-        'services': services,
-        'service_to_idx': service_to_idx,
-        'counts': counts,
-        'features': features,
-    }
-
-
-def _metadata_expected_services(meta, opt):
-    fields = [
-        item.strip()
-        for item in str(getattr(opt, 'absence_metadata_fields', '')).split(',')
-        if item.strip()
-    ]
-    ignored = {'none', 'all', 'all-observed-services', 'workload-generator', 'system-observability'}
-    services = []
-    seen = set()
-    for field in fields:
-        for service in _split_service_list(meta.get(field)):
-            service = _safe_text(service)
-            if not service or service.lower() in ignored:
-                continue
-            if not _service_allowed_for_absence(service, opt):
-                continue
-            if service not in seen:
-                seen.add(service)
-                services.append(service)
-    return services
-
-
-def _nearest_reference_indices(reference, query_counts, k):
-    if reference is None or reference['counts'].shape[0] == 0:
-        return np.array([], dtype=np.int64), 0.0
-    query = np.log1p(query_counts.astype(np.float32))
-    query_norm = np.linalg.norm(query)
-    if query_norm <= 1e-8:
-        sims = np.zeros(reference['features'].shape[0], dtype=np.float32)
-    else:
-        sims = reference['features'].dot(query / query_norm)
-    k_eff = max(1, min(int(k), sims.shape[0]))
-    top_idx = np.argsort(-sims)[:k_eff]
-    return top_idx.astype(np.int64), float(sims[top_idx[0]]) if top_idx.size else 0.0
-
-
-def fit_absence_evidence(raw_reference_data, raw_eval_data, opt):
-    if not getattr(opt, 'use_absence_aware_revision', False):
-        return {}, {}
-    if getattr(opt, 'absence_context_mode', 'context_memory') == 'context_memory':
-        return build_context_conditioned_absence_evidence(
-            raw_reference_data,
-            raw_eval_data,
-            opt,
-        )
-    reference = _fit_absence_reference(raw_reference_data, opt)
-    if reference is None:
-        return {}, {'enabled': True, 'reference_runs': 0, 'reference_services': 0}
-
-    eval_runs = _aggregate_run_service_counts(raw_eval_data, opt, normal_only=False)
-    k = int(getattr(opt, 'absence_k', 5))
-    beta = float(getattr(opt, 'absence_active_beta', 0.7))
-    min_expected = float(getattr(opt, 'absence_min_expected_count', 20.0))
-    ratio_threshold = float(getattr(opt, 'absence_count_ratio_threshold', 0.5))
-    anomaly_threshold = float(getattr(opt, 'absence_anomaly_threshold', 2.0))
-    sigma_floor_ratio = float(getattr(opt, 'absence_sigma_floor_ratio', 0.25))
-    coverage_threshold = float(getattr(opt, 'absence_coverage_threshold', 0.5))
-    context_mode = getattr(opt, 'absence_context_mode', 'hybrid')
-
-    evidence = {}
-    all_absence = []
-    conflict_runs = 0
-    for run_id, record in eval_runs.items():
-        query_counts = np.zeros(len(reference['services']), dtype=np.float32)
-        for service, count in record['counts'].items():
-            idx = reference['service_to_idx'].get(service)
-            if idx is not None:
-                query_counts[idx] = float(count)
-
-        nn_idx, nn_cosine = _nearest_reference_indices(reference, query_counts, k)
-        if nn_idx.size:
-            nn_counts = reference['counts'][nn_idx]
-        else:
-            nn_counts = reference['counts']
-
-        active_prob = (nn_counts > 0).mean(axis=0)
-        mu = nn_counts.mean(axis=0)
-        sigma = nn_counts.std(axis=0)
-        metadata_services = _metadata_expected_services(record['meta'], opt)
-        metadata_known = [s for s in metadata_services if s in reference['service_to_idx']]
-        memory_services = [
-            service
-            for service, idx in reference['service_to_idx'].items()
-            if active_prob[idx] >= beta and mu[idx] >= min_expected
-        ]
-        if context_mode == 'metadata':
-            expected_services = metadata_known
-        elif context_mode == 'memory':
-            expected_services = memory_services
-        else:
-            expected_services = metadata_known if metadata_known else memory_services
-
-        service_scores = {}
-        silenced = []
-        known = []
-        max_absence = 0.0
-        for service in expected_services:
-            idx = reference['service_to_idx'].get(service)
-            if idx is None:
-                continue
-            expected = float(mu[idx])
-            if expected < min_expected:
-                continue
-            observed = float(query_counts[idx])
-            floor = max(float(sigma[idx]), expected * sigma_floor_ratio, 1.0)
-            score = max(0.0, (expected - observed) / floor)
-            ratio_low = observed <= expected * ratio_threshold
-            if not ratio_low:
-                score = 0.0
-            known.append(service)
-            service_scores[service] = {
-                'observed': observed,
-                'expected': expected,
-                'score': score,
-                'ratio_low': bool(ratio_low),
-            }
-            max_absence = max(max_absence, score)
-            if score >= anomaly_threshold:
-                silenced.append(service)
-
-        if known:
-            coverage_support = 1.0 - (len(silenced) / max(len(known), 1))
-        else:
-            coverage_support = max(0.0, min(1.0, nn_cosine))
-        absence_conflict = bool(silenced)
-        coverage_conflict = bool(coverage_support < coverage_threshold)
-        if absence_conflict or coverage_conflict:
-            conflict_runs += 1
-        all_absence.append(max_absence)
-        evidence[run_id] = {
-            'absence_anomaly': float(max_absence),
-            'coverage_support': float(coverage_support),
-            'coverage_nn_cosine': float(max(0.0, min(1.0, nn_cosine))),
-            'absence_conflict': absence_conflict,
-            'coverage_conflict': coverage_conflict,
-            'expected_services': ','.join(expected_services),
-            'known_expected_services': ','.join(known),
-            'silenced_services': ','.join(silenced),
-            'service_scores': service_scores,
-        }
-
-    summary = {
-        'enabled': True,
-        'reference_runs': len(reference['run_ids']),
-        'reference_services': len(reference['services']),
-        'eval_runs': len(eval_runs),
-        'conflict_runs': conflict_runs,
-        'mean_absence_anomaly': float(np.mean(all_absence)) if all_absence else 0.0,
-        'max_absence_anomaly': float(np.max(all_absence)) if all_absence else 0.0,
-        'context_mode': context_mode,
-    }
-    return evidence, summary
-
-
-def build_absence_batch_context(raw_eval_data, batch_idx, batch_size, event_shape, device, evidence):
-    rows, cols = event_shape
-    absence = torch.zeros((rows, cols), dtype=torch.float32, device=device)
-    coverage = torch.ones((rows, cols), dtype=torch.float32, device=device)
-    nn_cosine = torch.ones((rows, cols), dtype=torch.float32, device=device)
-    absence_conflict = torch.zeros((rows, cols), dtype=torch.bool, device=device)
-    coverage_conflict = torch.zeros((rows, cols), dtype=torch.bool, device=device)
-    if not evidence:
-        return {
-            'absence_anomaly': absence,
-            'coverage_support': coverage,
-            'coverage_nn_cosine': nn_cosine,
-            'absence_conflict': absence_conflict,
-            'coverage_conflict': coverage_conflict,
-        }
-    for row in range(rows):
-        global_idx = batch_idx * batch_size + row
-        if global_idx < 0 or global_idx >= len(raw_eval_data):
-            continue
-        seq = raw_eval_data[global_idx]
-        if not seq:
-            continue
-        run_id = _safe_text(seq[0].get('run_id')) or _safe_text(seq[0].get('sequence_id'))
-        run_evidence = evidence.get(run_id)
-        if not run_evidence:
-            continue
-        absence[row, :] = float(run_evidence.get('absence_anomaly', 0.0))
-        coverage[row, :] = float(run_evidence.get('coverage_support', 1.0))
-        nn_cosine[row, :] = float(run_evidence.get('coverage_nn_cosine', 1.0))
-        absence_conflict[row, :] = bool(run_evidence.get('absence_conflict', False))
-        coverage_conflict[row, :] = bool(run_evidence.get('coverage_conflict', False))
-    return {
-        'absence_anomaly': absence,
-        'coverage_support': coverage,
-        'coverage_nn_cosine': nn_cosine,
-        'absence_conflict': absence_conflict,
-        'coverage_conflict': coverage_conflict,
-    }
 
 
 def init_binary_counts(prefix):
@@ -3329,8 +2997,7 @@ def apply_ensemble_correction(
         gamma,
         delta,
         opt,
-        drift_adapter=None,
-        absence_context=None):
+        drift_adapter=None):
     corrected_score = scores['anomaly_score'].clone()
     expected_drift_mask = torch.zeros_like(candidate_mask, dtype=torch.bool)
     stats = {
@@ -3348,8 +3015,6 @@ def apply_ensemble_correction(
         'counterfactual_supported': 0,
         'counterfactual_conflict': 0,
         'oov_type_unavailable': 0,
-        'absence_conflict': 0,
-        'coverage_conflict': 0,
         'diagnostics': None,
     }
 
@@ -3445,11 +3110,6 @@ def apply_ensemble_correction(
     context_conflict = torch.zeros_like(local_supported, dtype=torch.bool)
     oov_type_unavailable = torch.zeros_like(local_supported, dtype=torch.bool)
     correction_gain = torch.clamp(original_score - final_score, min=0.0)
-    absence_anomaly = torch.zeros_like(ensemble_time_nll, dtype=torch.float32)
-    coverage_support = torch.ones_like(ensemble_time_nll, dtype=torch.float32)
-    coverage_nn_cosine = torch.ones_like(ensemble_time_nll, dtype=torch.float32)
-    absence_conflict = torch.zeros_like(local_supported, dtype=torch.bool)
-    coverage_conflict = torch.zeros_like(local_supported, dtype=torch.bool)
 
     if getattr(opt, 'use_component_drift_diagnosis', False):
         thresholds = getattr(opt, '_component_thresholds', {}) or {}
@@ -3627,31 +3287,6 @@ def apply_ensemble_correction(
     provisional_expected = provisional_expected.bool()
     component_unexpected = component_unexpected.bool()
     component_reject = component_reject.bool()
-    if getattr(opt, 'use_absence_aware_revision', False) and absence_context is not None:
-        full_absence = absence_context.get('absence_anomaly')
-        full_coverage = absence_context.get('coverage_support')
-        full_nn_cosine = absence_context.get('coverage_nn_cosine')
-        full_absence_conflict = absence_context.get('absence_conflict')
-        full_coverage_conflict = absence_context.get('coverage_conflict')
-        if full_absence is not None:
-            absence_anomaly = full_absence[candidate_mask].to(time_gap_norm.device).float()
-        if full_coverage is not None:
-            coverage_support = full_coverage[candidate_mask].to(time_gap_norm.device).float()
-        if full_nn_cosine is not None:
-            coverage_nn_cosine = full_nn_cosine[candidate_mask].to(time_gap_norm.device).float()
-        if full_absence_conflict is not None:
-            absence_conflict = full_absence_conflict[candidate_mask].to(time_gap_norm.device).bool()
-        if full_coverage_conflict is not None:
-            coverage_conflict = full_coverage_conflict[candidate_mask].to(time_gap_norm.device).bool()
-
-        absence_revision_conflict = (
-            (absence_conflict | coverage_conflict)
-            & local_supported
-            & (final_score <= gamma)
-            & (~component_unexpected)
-        )
-        provisional_expected = provisional_expected & (~absence_conflict) & (~coverage_conflict)
-        component_reject = (component_reject | absence_revision_conflict) & (~component_unexpected)
     if drift_adapter is not None and drift_adapter.enabled:
         candidate_features = scores['memory_feature'][candidate_mask].to(time_gap_norm.device).float()
         refits_before = drift_adapter.num_refits
@@ -3717,11 +3352,6 @@ def apply_ensemble_correction(
             'context_conflict': torch.zeros_like(candidate_mask, dtype=torch.bool),
             'oov_type_unavailable': torch.zeros_like(candidate_mask, dtype=torch.bool),
             'correction_gain': torch.full_like(scores['anomaly_score'], float('nan'), dtype=torch.float32),
-            'absence_anomaly': torch.full_like(scores['anomaly_score'], float('nan'), dtype=torch.float32),
-            'coverage_support': torch.full_like(scores['anomaly_score'], float('nan'), dtype=torch.float32),
-            'coverage_nn_cosine': torch.full_like(scores['anomaly_score'], float('nan'), dtype=torch.float32),
-            'absence_conflict': torch.zeros_like(candidate_mask, dtype=torch.bool),
-            'coverage_conflict': torch.zeros_like(candidate_mask, dtype=torch.bool),
         }
         diagnostics['local_distance'][candidate_mask] = local['local_distance'].to(time_gap_norm.device).float()
         diagnostics['local_density_ratio'][candidate_mask] = local['local_density_ratio'].to(time_gap_norm.device).float()
@@ -3742,11 +3372,6 @@ def apply_ensemble_correction(
         diagnostics['context_conflict'][candidate_mask] = context_conflict
         diagnostics['oov_type_unavailable'][candidate_mask] = oov_type_unavailable
         diagnostics['correction_gain'][candidate_mask] = correction_gain
-        diagnostics['absence_anomaly'][candidate_mask] = absence_anomaly
-        diagnostics['coverage_support'][candidate_mask] = coverage_support
-        diagnostics['coverage_nn_cosine'][candidate_mask] = coverage_nn_cosine
-        diagnostics['absence_conflict'][candidate_mask] = absence_conflict
-        diagnostics['coverage_conflict'][candidate_mask] = coverage_conflict
         stats['diagnostics'] = diagnostics
 
     stats.update({
@@ -3766,8 +3391,6 @@ def apply_ensemble_correction(
             if getattr(opt, 'use_counterfactual_context_support', False) else 0
         ),
         'oov_type_unavailable': int(oov_type_unavailable.sum().item()),
-        'absence_conflict': int(absence_conflict.sum().item()),
-        'coverage_conflict': int(coverage_conflict.sum().item()),
         'support_sum': float(local_support.sum().item()),
         'ensemble_score_sum': float(ensemble_score.sum().item()),
     })
@@ -3787,33 +3410,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
     quarantine = DriftBuffer(max_size=opt.quarantine_max_size)
     drift_adapter = ProgressiveDriftAdapter(opt)
     raw_test_data = getattr(getattr(test_data, 'dataset', None), 'raw_data', None)
-    absence_evidence = {}
-    absence_summary = {}
-    if getattr(opt, 'use_absence_aware_revision', False):
-        absence_reference_path = str(getattr(opt, 'absence_reference_path', '') or '').strip()
-        if absence_reference_path:
-            raw_reference_data = load_memory_sequences(absence_reference_path)
-        elif getattr(opt, 'absence_reference_split', 'train') == 'calibration':
-            raw_reference_data = getattr(getattr(calibration_data, 'dataset', None), 'raw_data', None)
-        else:
-            raw_reference_data = _load_raw_split(opt, 'train')
-        absence_evidence, absence_summary = fit_absence_evidence(
-            raw_reference_data,
-            raw_test_data,
-            opt
-        )
-        absence_mechanism_name = (
-            'Context-conditioned Absence Memory'
-            if getattr(opt, 'absence_context_mode', 'context_memory') == 'context_memory'
-            else 'Legacy Absence-aware revision'
-        )
-        print(
-            f'[Info] {absence_mechanism_name}: '
-            f"refs={absence_summary.get('reference_runs', 0)} runs/"
-            f"{absence_summary.get('reference_services', 0)} services | "
-            f"eval_runs={absence_summary.get('eval_runs', 0)} | "
-            f"conflict_runs={absence_summary.get('conflict_runs', 0)}"
-        )
 
     total_events = 0
     total_traditional_alerts = 0
@@ -3835,8 +3431,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
     total_counterfactual_supported = 0
     total_counterfactual_conflict = 0
     total_oov_type_unavailable = 0
-    total_absence_conflict = 0
-    total_coverage_conflict = 0
     total_ensemble_support = 0.0
     total_ensemble_score = 0.0
     total_adapter_updates = 0
@@ -3966,16 +3560,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
             base_rq3_pred = torch.zeros_like(decision, dtype=torch.long)
             base_rq3_pred = base_rq3_pred.masked_fill(traditional_pred, 2)
             pre_revision_rq3_pred = decision_to_rq4_class(pre_revision_decision)
-            absence_context = None
-            if getattr(opt, 'use_absence_aware_revision', False):
-                absence_context = build_absence_batch_context(
-                    raw_test_data or [],
-                    batch_idx,
-                    opt.batch_size,
-                    anomaly_score.shape,
-                    opt.device,
-                    absence_evidence
-                )
 
             revision_candidates = (
                 diagnosis_candidate
@@ -3995,7 +3579,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
                 delta,
                 opt,
                 drift_adapter=drift_adapter,
-                absence_context=absence_context
             )
             expected_drift_mask = (decision == EXPECTED_DRIFT_DECISION) & mask
             reject_indicator = (decision == REJECT_DECISION) & mask
@@ -4114,8 +3697,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
             total_counterfactual_supported += ensemble_stats.get('counterfactual_supported', 0)
             total_counterfactual_conflict += ensemble_stats.get('counterfactual_conflict', 0)
             total_oov_type_unavailable += ensemble_stats.get('oov_type_unavailable', 0)
-            total_absence_conflict += ensemble_stats.get('absence_conflict', 0)
-            total_coverage_conflict += ensemble_stats.get('coverage_conflict', 0)
             total_ensemble_support += ensemble_stats['support_sum']
             total_ensemble_score += ensemble_stats['ensemble_score_sum']
             total_adapter_updates += ensemble_stats['adapter_updates']
@@ -4234,11 +3815,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
                     context_conflict = diagnostics.get('context_conflict')
                     oov_type_unavailable = diagnostics.get('oov_type_unavailable')
                     correction_gain = diagnostics.get('correction_gain')
-                    absence_anomaly = diagnostics.get('absence_anomaly')
-                    coverage_support = diagnostics.get('coverage_support')
-                    coverage_nn_cosine = diagnostics.get('coverage_nn_cosine')
-                    absence_conflict = diagnostics.get('absence_conflict')
-                    coverage_conflict = diagnostics.get('coverage_conflict')
 
                     def _maybe_float(tensor, row, col):
                         if tensor is None:
@@ -4316,11 +3892,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
                             'context_conflict': _maybe_bool(context_conflict, row, col),
                             'oov_type_unavailable': _maybe_bool(oov_type_unavailable, row, col),
                             'correction_gain': _maybe_float(correction_gain, row, col),
-                            'absence_anomaly': _maybe_float(absence_anomaly, row, col),
-                            'coverage_support': _maybe_float(coverage_support, row, col),
-                            'coverage_nn_cosine': _maybe_float(coverage_nn_cosine, row, col),
-                            'absence_conflict': _maybe_bool(absence_conflict, row, col),
-                            'coverage_conflict': _maybe_bool(coverage_conflict, row, col),
                             'gamma_anomaly': float(gamma),
                             'delta_uncertainty': float(delta),
                         })
@@ -4433,23 +4004,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
         'Counterfactual_Support_K': int(getattr(opt, 'counterfactual_support_k', 3)),
         'Counterfactual_Type_Support_Ratio': float(getattr(opt, 'counterfactual_type_support_ratio', 0.34)),
         'Counterfactual_Time_Support_Ratio': float(getattr(opt, 'counterfactual_time_support_ratio', 0.34)),
-        'Absence_Aware_Revision': int(getattr(opt, 'use_absence_aware_revision', False)),
-        'Absence_Context_Mode': getattr(opt, 'absence_context_mode', 'context_memory'),
-        'Absence_Mechanism': (
-            'Context-conditioned Absence Memory'
-            if getattr(opt, 'absence_context_mode', 'context_memory') == 'context_memory'
-            else 'Legacy absence-aware revision'
-        ),
-        'Absence_Reference_Path': str(getattr(opt, 'absence_reference_path', '') or ''),
-        'Absence_Reference_Runs': int(absence_summary.get('reference_runs', 0)) if absence_summary else 0,
-        'Absence_Reference_Services': int(absence_summary.get('reference_services', 0)) if absence_summary else 0,
-        'Absence_Conflict_Runs': int(absence_summary.get('conflict_runs', 0)) if absence_summary else 0,
-        'Absence_Anomaly_Threshold': float(getattr(opt, 'absence_anomaly_threshold', 2.0)),
-        'Absence_Persistence_Threshold': float(getattr(opt, 'absence_persistence_threshold', 0.5)),
-        'Absence_Min_Context_Similarity': float(getattr(opt, 'absence_min_context_similarity', 0.2)),
-        'Absence_Min_Query_Exposure': float(getattr(opt, 'absence_min_query_exposure', 50.0)),
-        'Absence_Count_Ratio_Threshold': float(getattr(opt, 'absence_count_ratio_threshold', 0.5)),
-        'Absence_Coverage_Threshold': float(getattr(opt, 'absence_coverage_threshold', 0.5)),
         'Treat_OOV_Type_As_Unavailable': int(getattr(opt, 'treat_oov_type_as_unavailable', False)),
         'OOV_Type_ID': int(getattr(opt, 'oov_type_id', -1)),
         'RQ4_Window_Expected_Min_Frac': float(getattr(opt, 'rq4_window_expected_min_frac', 0.50)),
@@ -4495,8 +4049,6 @@ def eval_reliability(model, calibration_data, test_data, opt):
         'Counterfactual_Context_Supported': total_counterfactual_supported,
         'Counterfactual_Context_Conflict': total_counterfactual_conflict,
         'OOV_Type_Unavailable_Events': total_oov_type_unavailable,
-        'Absence_Conflict_Events': total_absence_conflict,
-        'Coverage_Conflict_Events': total_coverage_conflict,
         'Ensemble_Disagreement_Threshold': float(getattr(opt, 'ensemble_disagreement_threshold', 2.0)),
         'Ensemble_Support_Rate': ensemble_support_rate,
         'Ensemble_Correction_Rate': ensemble_correction_rate,
@@ -5954,72 +5506,6 @@ def main():
         default=-1,
         help='Zero-based type id used for OOV/UNK targets in the raw event ids.'
     )
-    parser.add_argument(
-        '-use_absence_aware_revision',
-        action='store_true',
-        help=(
-            'Gate Expected-drift memory revision with Context-conditioned '
-            'Absence Memory.'
-        )
-    )
-    parser.add_argument(
-        '-absence_reference_path',
-        type=str,
-        default='',
-        help=(
-            'Optional standalone absence_memory.pkl (or its containing directory). '
-            'When set, it is used only by the absence mechanism and does not alter '
-            'the model training split.'
-        )
-    )
-    parser.add_argument(
-        '-absence_reference_split',
-        choices=['train', 'calibration'],
-        default='train',
-        help='Raw split used as trusted normal service-coverage memory.'
-    )
-    parser.add_argument(
-        '-absence_context_mode',
-        choices=['context_memory', 'hybrid', 'metadata', 'memory'],
-        default='context_memory',
-        help=(
-            'context_memory is the metadata-free main-paper mechanism with '
-            'leave-one-service-out retrieval, exposure normalisation, empirical '
-            'lower-tail scoring, and run-horizon persistence. Other modes are '
-            'retained only for legacy/upper-bound comparisons.'
-        )
-    )
-    parser.add_argument(
-        '-absence_metadata_fields',
-        type=str,
-        default='',
-        help=(
-            'Legacy-only comma-separated metadata fields. The main-paper '
-            'context_memory mode ignores this option and uses log context only.'
-        )
-    )
-    parser.add_argument(
-        '-absence_exclude_services',
-        type=str,
-        default='system-observability,tsdb-mysql,nacosdb-mysql',
-        help='Comma-separated service names excluded from absence evidence.'
-    )
-    parser.add_argument(
-        '-absence_service_prefixes',
-        type=str,
-        default='',
-        help='Optional comma-separated allowed service prefixes; empty allows all non-excluded services.'
-    )
-    parser.add_argument('-absence_k', type=int, default=20)
-    parser.add_argument('-absence_active_beta', type=float, default=0.7)
-    parser.add_argument('-absence_min_expected_count', type=float, default=20.0)
-    parser.add_argument('-absence_count_ratio_threshold', type=float, default=0.5)
-    parser.add_argument('-absence_anomaly_threshold', type=float, default=2.0)
-    parser.add_argument('-absence_persistence_threshold', type=float, default=0.5)
-    parser.add_argument('-absence_min_context_similarity', type=float, default=0.2)
-    parser.add_argument('-absence_min_query_exposure', type=float, default=50.0)
-    parser.add_argument('-absence_sigma_floor_ratio', type=float, default=0.25)
-    parser.add_argument('-absence_coverage_threshold', type=float, default=0.5)
     parser.add_argument('-drift_window_size', type=int, default=1000)
     parser.add_argument('-drift_threshold', type=float, default=0.3)
     parser.add_argument('-quarantine_max_size', type=int, default=50000)
