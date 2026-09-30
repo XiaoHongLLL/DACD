@@ -31,23 +31,4 @@ Existing checkpoints are never overwritten by a training entry.
 | Liberty | 2,000,000 | 1,169,860 | 830,140 |
 | Train-Ticket (scored positions) | 584,320 | 158,746 | 425,574 |
 
-Train-Ticket is v0.6, 368 runs: train30/adapt40/dev40/test120/archive138.
-All five splits are included; only test120 is the formal evaluation set.
-The model inputs retain 596,793 window positions, including 12,473 first positions
-needed as context. Excluding these yields the 584,320 scored positions above;
-these are window occurrences, not necessarily unique raw messages. No prediction files are bundled.
 
-Public evaluation preserves the screenshot's historical adaptive profiles, including
-targeted HDFS; `model/public` freezes the older public engine, while `model/current`
-supplies targeted HDFS and Train-Ticket. These are required implementations, not backups.
-Public `metrics.csv` reports both historical target-only labels and full-sequence
-labels; only target-only corresponds to the screenshot. Profiles/refinement contribute
-to the historical results, which are not a pure neural a/u ablation.
-Original benchmark checkpoints are not bundled; fresh training does not guarantee
-identical rounded screenshot numbers. Train-Ticket fresh training selects valid_acc
-on the included v0.6 dev split, not the historical v0.4 dev split; its evaluation
-uses the fixed a/u/m rule on test120. Exact historical evaluation needs the original
-frozen checkpoint via `CHECKPOINT=... bash run_train_ticket.sh eval`.
-
-For GitHub, extract this archive and push the directory with Git. Individual files
-are below 100 MiB; some exceed the web uploader's 25 MiB limit.
