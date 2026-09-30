@@ -1,12 +1,8 @@
-
 import csv
 import sys
 from pathlib import Path
 
-version = sys.argv.pop(1)
-if version not in ('current', 'public'):
-    raise ValueError(version)
-sys.path.insert(0, str(Path(__file__).resolve().parent / version))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 import main as engine
 from preprocess.Dataset import EventData
