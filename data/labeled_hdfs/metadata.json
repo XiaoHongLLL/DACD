@@ -1,0 +1,27 @@
+{
+  "dataset": "HDFS_v1",
+  "label_granularity": "block_trace",
+  "event_type_mode": "preprocessed_event_id",
+  "num_raw_sequences": 120000,
+  "dim_process": 29,
+  "stats": {
+    "train": {
+      "sequences": 61897,
+      "events": 1208378,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "dev": {
+      "sequences": 20632,
+      "events": 401895,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "test": {
+      "sequences": 37471,
+      "events": 690410,
+      "anomaly_events": 288250,
+      "anomaly_sequences": 16838
+    }
+  }
+}

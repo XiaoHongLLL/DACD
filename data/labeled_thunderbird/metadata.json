@@ -1,0 +1,30 @@
+{
+  "dataset": "Thunderbird",
+  "label_granularity": "event_line",
+  "event_type_mode": "component_normalized_content",
+  "max_lines": 2000000,
+  "window_size": 50,
+  "step_size": 50,
+  "num_raw_sequences": 40000,
+  "dim_process": 512,
+  "stats": {
+    "train": {
+      "sequences": 23046,
+      "events": 1152300,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "dev": {
+      "sequences": 7682,
+      "events": 384100,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "test": {
+      "sequences": 9272,
+      "events": 463600,
+      "anomaly_events": 6619,
+      "anomaly_sequences": 1589
+    }
+  }
+}

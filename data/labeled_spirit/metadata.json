@@ -1,0 +1,30 @@
+{
+  "dataset": "Spirit",
+  "label_granularity": "event_line",
+  "event_type_mode": "component_normalized_content_or_empty_location",
+  "max_lines": 2000000,
+  "window_size": 50,
+  "step_size": 50,
+  "num_raw_sequences": 40000,
+  "dim_process": 512,
+  "stats": {
+    "train": {
+      "sequences": 12468,
+      "events": 623400,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "dev": {
+      "sequences": 4156,
+      "events": 207800,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "test": {
+      "sequences": 23376,
+      "events": 1168800,
+      "anomaly_events": 461797,
+      "anomaly_sequences": 19220
+    }
+  }
+}

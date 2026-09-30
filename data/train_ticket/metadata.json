@@ -1,0 +1,118 @@
+{
+  "dataset_version": "train-ticket-v0.6-368-20260913",
+  "total_unique_runs": 368,
+  "new_runs": 200,
+  "legacy_runs": 168,
+  "dim_process": 699,
+  "known_template_count": 443,
+  "oov_buckets": 256,
+  "window_size": 50,
+  "step_size": 50,
+  "min_window_events": 10,
+  "tail_policy": "legacy last-window alignment; final window may overlap; event_occurrences are not unique raw events",
+  "sequence_unit": "run_id+phase+service_name",
+  "sequence_unit_mode": "service",
+  "training_sampler": "run-balanced",
+  "split_sequences": {
+    "train": 879,
+    "supervised_adapt": 1489,
+    "dev": 1494,
+    "test": 4471,
+    "development_archive": 4140
+  },
+  "splits": {
+    "train": {
+      "runs": 30,
+      "sequences": 879,
+      "event_occurrences": 39598,
+      "semantic_counts": {
+        "expected": 30
+      },
+      "benchmark_counts": {
+        "baseline_normal": 20,
+        "no_op_control": 10
+      },
+      "oov_event_occurrences": 0
+    },
+    "supervised_adapt": {
+      "runs": 40,
+      "sequences": 1489,
+      "event_occurrences": 72016,
+      "semantic_counts": {
+        "expected": 20,
+        "unexpected": 20
+      },
+      "benchmark_counts": {
+        "expected_drift": 13,
+        "successful_no_drift": 7,
+        "unexpected_drift": 19,
+        "unexpected_without_observable_log_drift": 1
+      },
+      "oov_event_occurrences": 24043
+    },
+    "dev": {
+      "runs": 40,
+      "sequences": 1494,
+      "event_occurrences": 72234,
+      "semantic_counts": {
+        "unexpected": 20,
+        "expected": 20
+      },
+      "benchmark_counts": {
+        "unexpected_drift": 20,
+        "expected_drift": 13,
+        "successful_no_drift": 7
+      },
+      "oov_event_occurrences": 23978
+    },
+    "test": {
+      "runs": 120,
+      "sequences": 4471,
+      "event_occurrences": 216200,
+      "semantic_counts": {
+        "unexpected": 60,
+        "expected": 60
+      },
+      "benchmark_counts": {
+        "unexpected_drift": 57,
+        "expected_drift": 35,
+        "successful_no_drift": 25,
+        "unexpected_without_observable_log_drift": 3
+      },
+      "oov_event_occurrences": 72383
+    },
+    "development_archive": {
+      "runs": 138,
+      "sequences": 4140,
+      "event_occurrences": 196745,
+      "semantic_counts": {
+        "expected": 72,
+        "unexpected": 66
+      },
+      "benchmark_counts": {
+        "baseline_normal": 4,
+        "no_op_control": 2,
+        "expected_drift": 33,
+        "successful_no_drift": 33,
+        "unexpected_drift": 33,
+        "unexpected_without_observable_log_drift": 33
+      },
+      "oov_event_occurrences": 48703
+    }
+  },
+  "new_label_source": "E/U from actual external oracle; drift subcategory recomputed using frozen control thresholds",
+  "legacy_label_source": "preserved byte-for-byte from v0.4; historical target-label materialization retained",
+  "new_target_observed_mismatches": 89,
+  "vocabulary_policy": "exact legacy train-only vocabulary and exact train.pkl reused; no new test vocabulary fit",
+  "protocol_freeze_id": "fc84e8e7a06bed694d36784028f8a001858a216a2def99c263265e03a1b9589a",
+  "scenario_template_overlap": true,
+  "generalization_scope": "new runs/workload seeds/implementation instances; not unseen scenario families",
+  "streams_new_scope": "all collected events for new200; zero-event services retained in service_inventory_new.csv",
+  "source_audit_collection_valid": true,
+  "excluded_failed_run": "ttv06_supervised_adapt_route_unexpected_drift_r01_006",
+  "new_collected_events": 508804,
+  "scored_event_occurrences": 584320,
+  "scored_expected": 158746,
+  "scored_unexpected": 425574,
+  "formal_test_input": "test.pkl; labels are used for evaluation only"
+}

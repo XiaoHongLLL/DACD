@@ -1,0 +1,31 @@
+{
+  "dataset": "Liberty",
+  "label_granularity": "event_line",
+  "event_type_mode": "component_normalized_content_or_empty_location",
+  "skip_lines": 40000000,
+  "max_lines": 2000000,
+  "window_size": 50,
+  "step_size": 50,
+  "num_raw_sequences": 40000,
+  "dim_process": 512,
+  "stats": {
+    "train": {
+      "sequences": 3465,
+      "events": 173250,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "dev": {
+      "sequences": 1155,
+      "events": 57750,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "test": {
+      "sequences": 35380,
+      "events": 1769000,
+      "anomaly_events": 830140,
+      "anomaly_sequences": 34224
+    }
+  }
+}

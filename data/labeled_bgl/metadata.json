@@ -1,0 +1,30 @@
+{
+  "dataset": "BGL",
+  "label_granularity": "event_line",
+  "event_type_mode": "type_component_level_normalized_content",
+  "max_lines": 0,
+  "window_size": 50,
+  "step_size": 50,
+  "num_raw_sequences": 94269,
+  "dim_process": 512,
+  "stats": {
+    "train": {
+      "sequences": 51279,
+      "events": 2563950,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "dev": {
+      "sequences": 17093,
+      "events": 854650,
+      "anomaly_events": 0,
+      "anomaly_sequences": 0
+    },
+    "test": {
+      "sequences": 25897,
+      "events": 1294850,
+      "anomaly_events": 348452,
+      "anomaly_sequences": 8804
+    }
+  }
+}
