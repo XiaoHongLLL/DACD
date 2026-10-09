@@ -1,7 +1,7 @@
 # DACD
 
 This repository provides the DACD source code, training and evaluation scripts, and preprocessed datasets for five public log datasets and the controlled Train-Ticket benchmark.
-The experiments reported in the paper used Python 3.9.25 and PyTorch 2.5.1.
+
 
 From this directory (a CUDA GPU is recommended):
 
