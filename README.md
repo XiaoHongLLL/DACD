@@ -1,9 +1,7 @@
 # DACD
 
-Model source, six train/evaluate entry points, and the exact preprocessed dataset splits.
-Linux + Bash; Python 3.9. Local smoke checks use PyTorch 1.9.0+cu111,
-NumPy 1.26.4 and torchdiffeq 0.2.5 (full benchmark training was not rerun).
-Install a suitable PyTorch build, then `pip install numpy==1.26.4 torchdiffeq==0.2.5 tqdm pandas`.
+This repository provides the DACD source code, training and evaluation scripts, and preprocessed datasets for five public log datasets and the controlled Train-Ticket benchmark.
+The experiments reported in the paper used Python 3.9.25 and PyTorch 2.5.1.
 
 From this directory (a CUDA GPU is recommended):
 
